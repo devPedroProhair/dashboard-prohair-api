@@ -194,6 +194,7 @@ async def dashboard(
     periodo: str = "mes",
     data_inicio: Optional[str] = None,
     data_fim: Optional[str] = None,
+    vendedora: Optional[str] = None,   # ← perfil vendedora: filtra no servidor
 ):
     data_ini, data_fim_calc = calcular_datas(periodo, data_inicio, data_fim)
     dias = contar_dias(data_ini, data_fim_calc)
@@ -207,7 +208,6 @@ async def dashboard(
 
     for item in todos:
         p = item.get("pedido", item)
-        print(f"DEBUG → situacao: '{p.get('situacao')}' | natureza: '{p.get('natureza_operacao', '')[:40]}'")
         empresa = item.get("_empresa", "")
 
         if not isinstance(p, dict):
@@ -223,6 +223,10 @@ async def dashboard(
 
         nome = nome_vendedor(p)
         if not nome:
+            continue
+
+        # Restrição por perfil: vendedora só vê seus próprios dados
+        if vendedora and vendedora.lower() not in nome.lower():
             continue
 
         valor = extrair_valor(p)
