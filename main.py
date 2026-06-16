@@ -51,6 +51,8 @@ METAS_DIARIAS = {
 TERMOS_BLOQUEADOS = {"BONIFICA", "BRINDE", "TROCA", "GARANTIA", "REMESSA"}
 VENDEDORES_BLOQUEADOS = {"ANAMELIA", "LUIZ", "ANA CLARA", "ANDREZA", "NÍVIA"}
 
+# Únicos status aceitos nos dois endpoints: /api/dashboard e /api/pedidos
+# Qualquer outro status (em aberto, aguardando aprovação, etc.) é ignorado.
 STATUS_VALIDOS = {
     "aprovado",
     "preparando envio",
@@ -205,12 +207,17 @@ async def dashboard(
 
     for item in todos:
         p = item.get("pedido", item)
+        print(f"DEBUG → situacao: '{p.get('situacao')}' | natureza: '{p.get('natureza_operacao', '')[:40]}'")
         empresa = item.get("_empresa", "")
 
         if not isinstance(p, dict):
             continue
-        if p.get("situacao") == "Cancelado":
+
+        # ← Bloqueia qualquer status fora da lista válida (em aberto, aguardando, etc.)
+        situacao = (p.get("situacao") or "").strip()
+        if situacao.lower() not in STATUS_VALIDOS:
             continue
+
         if not natureza_ok(p):
             continue
 
