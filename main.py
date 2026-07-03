@@ -9,6 +9,11 @@ from typing import Optional
 import os
 from dotenv import load_dotenv
 
+from tiny_auth import TinyAuth
+from httpx import AsyncClient, Limits
+
+http_client = AsyncClient(timeout=30, limits=Limits(max_connections=20))
+
 load_dotenv()
 app = FastAPI()
 
@@ -19,29 +24,82 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== TOKENS ====================
+# ==================== AUTENTICAÇÃO OAUTH2 (API v3) ====================
+# Cada empresa tem sua própria conta/aplicativo no Tiny.
 
-TOKENS_PROHAIR = [
-    os.getenv("TOKEN_PROHAIR")
+AUTH_PROHAIR = TinyAuth(
+    nome_empresa="ProHair",
+    client_id=os.getenv("TINY_PROHAIR_CLIENT_ID", ""),
+    client_secret=os.getenv("TINY_PROHAIR_CLIENT_SECRET", ""),
+    refresh_token_inicial=os.getenv("TINY_PROHAIR_REFRESH_TOKEN", ""),
+)
+
+AUTH_PROGROWTH = TinyAuth(
+    nome_empresa="ProGrowth",
+    client_id=os.getenv("TINY_PROGROWTH_CLIENT_ID", ""),
+    client_secret=os.getenv("TINY_PROGROWTH_CLIENT_SECRET", ""),
+    refresh_token_inicial=os.getenv("TINY_PROGROWTH_REFRESH_TOKEN", ""),
+)
+
+EMPRESAS = [
+    ("ProHair", AUTH_PROHAIR),
+    ("ProGrowth", AUTH_PROGROWTH),
 ]
 
-TOKENS_PROGROWTH = [
-    os.getenv("TOKEN_PROGROWTH")
-]
+if not AUTH_PROHAIR.refresh_token or not AUTH_PROGROWTH.refresh_token:
+    print("❌ ERRO CRÍTICO: refresh_token do Tiny não encontrado nas variáveis de ambiente!")
 
-if not TOKENS_PROHAIR[0] or not TOKENS_PROGROWTH[0]:
-    print("❌ ERRO CRÍTICO: Os tokens do Tiny ERP não foram encontrados nas variáveis de ambiente!")
+BASE_URL_V3 = "https://api.tiny.com.br/public-api/v3"
+
+# ==================== CACHE DE PEDIDOS (Performance) ====================
+import json
+import os
+
+CACHE_PEDIDOS_ARQUIVO = ".cache_natureza_pedidos.json"
+cache_pedidos = {}
+
+def carregar_cache_pedidos():
+    global cache_pedidos
+    if os.path.exists(CACHE_PEDIDOS_ARQUIVO):
+        try:
+            with open(CACHE_PEDIDOS_ARQUIVO, "r") as f:
+                cache_pedidos = json.load(f)
+        except Exception:
+            cache_pedidos = {}
+
+def salvar_cache_pedidos():
+    try:
+        with open(CACHE_PEDIDOS_ARQUIVO, "w") as f:
+            json.dump(cache_pedidos, f)
+    except Exception:
+        pass
+
+# Carrega o cache para a memória assim que a API inicia
+carregar_cache_pedidos()
+
+# Mapa para exibição amigável da situação no frontend
+SITUACOES_NOME = {
+    0: "Aberta",
+    1: "Faturada",
+    2: "Cancelada",
+    3: "Aprovado",
+    4: "Preparando envio",
+    5: "Enviado",
+    6: "Entregue",
+    7: "Pronto para envio",
+    8: "Dados Incompletos",
+    9: "Não Entregue",
+}
 
 # ==================== METAS DIÁRIAS (R$/dia por vendedora) ====================
 
-METAS_DIARIAS = {
+METAS_MENSAIS = {
     "PADRAO": 0,
-    # ProHair
-    "Maria Clara David Pais": 3000.00,
-    "Stephany Carolliny Soares Cândido Moreira": 1166.00,
-    "Jenifer Mikaele Santos de Oliveira": 1166.00,
-    "Marina David de Souza": 1166.00,
-    "Livia Quirino Santos": 1500.00,
+    "Maria Clara David Pais": 90000.00,
+    "Livia Quirino Santos": 45000.00,
+    "Stephany Carolliny Soares Cândido Moreira": 35000.00,
+    "Jenifer Mikaele Santos de Oliveira": 60000.00,
+    "Marina David de Souza": 35000.00,
     # ProGrowth — adicione as vendedoras e metas aqui:
     # "Nome Completo ProGrowth": 1500.00,
 }
@@ -51,26 +109,35 @@ METAS_DIARIAS = {
 TERMOS_BLOQUEADOS = {"BONIFICA", "BRINDE", "TROCA", "GARANTIA", "REMESSA"}
 VENDEDORES_BLOQUEADOS = {"ANAMELIA", "LUIZ", "ANA CLARA", "ANDREZA", "NÍVIA"}
 
-# Únicos status aceitos nos dois endpoints: /api/dashboard e /api/pedidos
-# Qualquer outro status (em aberto, aguardando aprovação, etc.) é ignorado.
-STATUS_VALIDOS = {
-    "aprovado",
-    "preparando envio",
-    "faturado",
-    "pronto para envio",
-    "enviado",
-    "entregue",
-}
+# Códigos numéricos de situação na API v3 (confirmados via documentação oficial):
+# 0=Aberta, 1=Faturada, 2=Cancelada, 3=Aprovada, 4=Preparando Envio,
+# 5=Enviada, 6=Entregue, 7=Pronto Envio, 8=Dados Incompletos, 9=Não Entregue
+SITUACOES_VALIDAS = {1, 3, 4, 5, 6, 7}  # Faturada, Aprovada, Preparando, Enviada, Entregue, Pronto
 
 # ==================== DATAS ====================
 
+def parse_data_front(data_str: str) -> datetime:
+    """Transforma a data que vem do frontend em um objeto datetime seguro."""
+    try:
+        if "/" in data_str:
+            # Se o frontend mandou DD/MM/YYYY
+            return datetime.strptime(data_str[:10], "%d/%m/%Y")
+        else:
+            # Se o frontend mandou YYYY-MM-DD ou formato ISO longo (ex: 2026-07-01T00:00:00.000Z)
+            return datetime.strptime(data_str[:10], "%Y-%m-%d")
+    except Exception:
+        # Em caso de lixo na string, usa a data atual por segurança
+        return datetime.now()
+
+
 def calcular_datas(periodo: str, data_ini: Optional[str], data_fim: Optional[str]):
+    """Retorna datas estritamente no formato YYYY-MM-DD, que é o exigido pela API v3."""
     hoje = datetime.now()
 
     if periodo == "personalizado" and data_ini and data_fim:
-        return data_ini, data_fim
-
-    if periodo == "semana":
+        inicio = parse_data_front(data_ini)
+        fim = parse_data_front(data_fim)
+    elif periodo == "semana":
         dias_para_domingo = (hoje.weekday() + 1) % 7
         inicio = hoje - timedelta(days=dias_para_domingo)
         fim = inicio + timedelta(days=6)
@@ -79,100 +146,177 @@ def calcular_datas(periodo: str, data_ini: Optional[str], data_fim: Optional[str
         ultimo = calendar.monthrange(hoje.year, hoje.month)[1]
         fim = hoje.replace(day=ultimo)
     else:  # hoje
-        inicio = fim = hoje
+        inicio = hoje
+        fim = hoje
 
-    return inicio.strftime("%d/%m/%Y"), fim.strftime("%d/%m/%Y")
+    # Retorna EXATAMENTE o formato %Y-%m-%d (Ano-Mês-Dia) para a API do Tiny não recusar (Erro 400)
+    return inicio.strftime("%Y-%m-%d"), fim.strftime("%Y-%m-%d")
 
 
 def contar_dias(data_ini: str, data_fim: str) -> int:
     try:
-        d1 = datetime.strptime(data_ini, "%d/%m/%Y")
-        d2 = datetime.strptime(data_fim, "%d/%m/%Y")
+        # data_ini e data_fim chegam aqui já formatados como YYYY-MM-DD
+        d1 = datetime.strptime(data_ini, "%Y-%m-%d")
+        d2 = datetime.strptime(data_fim, "%Y-%m-%d")
         return abs((d2 - d1).days) + 1
     except Exception:
         return 1
 
-# ==================== FETCH ASYNC ====================
 
-async def buscar_pagina(client: httpx.AsyncClient, token: str, data_ini: str, data_fim: str, pagina: int):
-    url = "https://api.tiny.com.br/api2/pedidos.pesquisa.php"
+def data_para_exibicao(data_iso: str) -> str:
+    """Converte YYYY-MM-DD de volta para DD/MM/YYYY para exibição em português no frontend."""
+    if not data_iso:
+        return ""
+    try:
+        return datetime.strptime(data_iso[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        return data_iso
+
+# ==================== FETCH ASYNC (API v3) ====================
+
+async def buscar_pagina_v3(
+    client: httpx.AsyncClient,
+    auth: TinyAuth,
+    data_ini: str,
+    data_fim: str,
+    offset: int,
+    limit: int = 100,
+    tentativas: int = 3,
+) -> tuple[list[dict], int]:
+    """Busca uma página de pedidos (offset/limit) via API v3."""
+    url = f"{BASE_URL_V3}/pedidos"
     params = {
-        "token": token,
-        "formato": "json",
         "dataInicial": data_ini,
         "dataFinal": data_fim,
-        "pagina": pagina,
+        "limit": limit,
+        "offset": offset,
     }
-    try:
-        r = await client.get(url, params=params, timeout=12)
-        dados = r.json().get("retorno", {})
-        if dados.get("status") == "Erro":
+
+    for tentativa in range(1, tentativas + 1):
+        token = await auth.obter_token(client)
+        if not token:
+            print(f"DEBUG buscar_pagina_v3[{auth.nome_empresa}] | sem access_token válido, abortando")
             return [], 0
-        return dados.get("pedidos", []), int(dados.get("numero_paginas", 1))
-    except Exception:
-        return [], 0
+
+        headers = {"Authorization": f"Bearer {token}"}
+        print(f"DEBUG buscar_pagina_v3[{auth.nome_empresa}] | usando token ...{token[-8:]}")
+        
+        async with auth.semaforo:
+            # =========================================================
+            # FREIO DE REQUISIÇÕES: Pausa 1 segundo antes de bater na API
+            # Isso impede o erro 429 (Too Many Requests)
+            # =========================================================
+            await asyncio.sleep(1)
+
+            try:
+                r = await client.get(url, params=params, headers=headers, timeout=15)
+                if r.status_code == 200:
+                    dados = r.json()
+                    itens = dados.get("itens", [])
+                    total = dados.get("paginacao", {}).get("total", len(itens))
+                    return itens, total
+                elif r.status_code == 401:
+                    print(f"DEBUG buscar_pagina_v3[{auth.nome_empresa}] | Token rejeitado (401). Invalidando token...")
+                    auth.invalidar_token()
+                # ---------------------------
+                else:
+                    corpo = r.text[:300] if r.text else "(vazio)"
+                    headers_relevantes = {k: v for k, v in r.headers.items() if k.lower() in ("www-authenticate", "x-error", "content-type")}
+                    print(f"DEBUG buscar_pagina_v3[{auth.nome_empresa}] | tentativa {tentativa}/{tentativas} "
+                          f"status={r.status_code} corpo='{corpo}' headers={headers_relevantes}")
+            except Exception as e:
+                print(f"DEBUG buscar_pagina_v3[{auth.nome_empresa}] | ERRO DETALHADO: {type(e).__name__} - {e}")
+
+        if tentativa < tentativas:
+            espera = 3 * tentativa  # backoff mais forte para 429
+            await asyncio.sleep(espera)
+
+    print(f"DEBUG buscar_pagina_v3[{auth.nome_empresa}] | DESISTIU após {tentativas} tentativas")
+    return [], 0
 
 
-async def buscar_por_empresa(
+async def buscar_por_empresa_v3(
     client: httpx.AsyncClient,
-    tokens: list[str],
+    auth: TinyAuth,
     data_ini: str,
     data_fim: str,
     empresa: str,
 ) -> list[dict]:
-    # Primeira página de cada token em paralelo
-    primeiras = await asyncio.gather(
-        *[buscar_pagina(client, t, data_ini, data_fim, 1) for t in tokens]
-    )
+    limit = 100
+    primeira_pagina, total = await buscar_pagina_v3(client, auth, data_ini, data_fim, offset=0, limit=limit)
 
-    todos: list[dict] = []
-    proximas_tarefas: list[tuple] = []  # (coroutine, empresa)
+    for item in primeira_pagina:
+        item["_empresa"] = empresa
+        item["_auth"] = auth
 
-    for i, (pedidos, total_paginas) in enumerate(primeiras):
-        token = tokens[i]
-        for item in pedidos:
-            item["_empresa"] = empresa
-        todos.extend(pedidos)
-        for p in range(2, total_paginas + 1):
-            proximas_tarefas.append(
-                (buscar_pagina(client, token, data_ini, data_fim, p), empresa)
-            )
+    todos = list(primeira_pagina)
 
-    if proximas_tarefas:
-        extras = await asyncio.gather(*[t[0] for t in proximas_tarefas])
-        for idx, (pedidos, _) in enumerate(extras):
-            emp = proximas_tarefas[idx][1]
-            for item in pedidos:
-                item["_empresa"] = emp
-            todos.extend(pedidos)
+    if total > limit:
+        offsets_restantes = list(range(limit, total, limit))
+        tarefas = [
+            buscar_pagina_v3(client, auth, data_ini, data_fim, offset=off, limit=limit)
+            for off in offsets_restantes
+        ]
+        resultados = await asyncio.gather(*tarefas)
+        for itens, _ in resultados:
+            for item in itens:
+                item["_empresa"] = empresa
+                item["_auth"] = auth
+            todos.extend(itens)
 
     return todos
 
 
-async def buscar_todos(data_ini: str, data_fim: str) -> list[dict]:
-    async with httpx.AsyncClient() as client:
-        ph, pg = await asyncio.gather(
-            buscar_por_empresa(client, TOKENS_PROHAIR, data_ini, data_fim, "ProHair"),
-            buscar_por_empresa(client, TOKENS_PROGROWTH, data_ini, data_fim, "ProGrowth"),
-        )
-        return ph + pg
+async def buscar_todos_v3(data_ini: str, data_fim: str) -> list[dict]:
+        resultados = await asyncio.gather(*[
+            buscar_por_empresa_v3(http_client, auth, data_ini, data_fim, nome)
+            for nome, auth in EMPRESAS
+        ])
+        todos = []
+        for lista in resultados:
+            todos.extend(lista)
+        return todos
+
+async def buscar_detalhe_v3(
+    client: httpx.AsyncClient,
+    auth: TinyAuth,
+    id_pedido: str,
+    tentativas: int = 3,
+) -> dict:
+    """Busca os detalhes completos do pedido para lermos a Natureza da Operação verdadeira."""
+    if not id_pedido:
+        return {}
+        
+    url = f"{BASE_URL_V3}/pedidos/{id_pedido}"
+    
+    for tentativa in range(1, tentativas + 1):
+        token = await auth.obter_token(client)
+        if not token:
+            return {}
+
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        async with auth.semaforo:
+            try:
+                r = await client.get(url, headers=headers, timeout=15)
+                if r.status_code == 200:
+                    return r.json()
+                elif r.status_code == 401:
+                    auth.invalidar_token()
+                elif r.status_code == 429:
+                    await asyncio.sleep(2 * tentativa) # Se o Tiny reclamar de limite, espera um pouco
+            except Exception:
+                pass
+                
+        if tentativa < tentativas:
+            await asyncio.sleep(1 * tentativa)
+
+    return {}
 
 # ==================== HELPERS ====================
 
-def extrair_valor(p: dict) -> float:
-    try:
-        itens = p.get("itens", [])
-        if itens:
-            v = sum(float(i.get("item", {}).get("valor_total") or 0) for i in itens)
-            if v > 0:
-                return v
-        return float(p.get("valor_produtos") or p.get("valor") or 0)
-    except Exception:
-        return 0.0
-
-
-def nome_vendedor(p: dict) -> Optional[str]:
-    raw = p.get("nome_vendedor", "").strip()
+def nome_vendedor(item: dict) -> Optional[str]:
+    raw = ((item.get("vendedor") or {}).get("nome") or "").strip()
     if not raw:
         return None
     up = raw.upper()
@@ -183,9 +327,11 @@ def nome_vendedor(p: dict) -> Optional[str]:
     return raw.replace("Pós Vendas - ", "")
 
 
-def natureza_ok(p: dict) -> bool:
-    nat = p.get("natureza_operacao", "").upper()
-    return not any(t in nat for t in TERMOS_BLOQUEADOS)
+def extrair_valor(item: dict) -> float:
+    try:
+        return float(item.get("valor") or 0)
+    except Exception:
+        return 0.0
 
 # ==================== ENDPOINTS ====================
 
@@ -194,42 +340,75 @@ async def dashboard(
     periodo: str = "mes",
     data_inicio: Optional[str] = None,
     data_fim: Optional[str] = None,
-    vendedora: Optional[str] = None,   # ← perfil vendedora: filtra no servidor
+    vendedora: Optional[str] = None,
 ):
     data_ini, data_fim_calc = calcular_datas(periodo, data_inicio, data_fim)
     dias = contar_dias(data_ini, data_fim_calc)
 
-    todos = await buscar_todos(data_ini, data_fim_calc)
+    todos = await buscar_todos_v3(data_ini, data_fim_calc)
+
+    # 1. Filtro Básico: Apenas situações válidas
+    pre_candidatos = [item for item in todos if item.get("situacao") in SITUACOES_VALIDAS]
+
+    # 2. Filtro Profundo com CACHE e Lotes (Muito mais estável)
+    candidatos = []
+    pedidos_para_buscar = []
+    TAMANHO_LOTE = 10  # Processa de 10 em 10 para não estourar o limite da API
+
+    # Separa quem já conhecemos de quem é novo
+    for item in pre_candidatos:
+        id_pedido = str(item.get("id"))
+        if id_pedido in cache_pedidos:
+            if not cache_pedidos[id_pedido]: 
+                candidatos.append(item)
+        else:
+            pedidos_para_buscar.append(item)
+
+    # Só busca na API os pedidos que o script ainda não conhece, em lotes
+    if pedidos_para_buscar:
+        async with httpx.AsyncClient() as client:
+            # Divide a lista em blocos (batches)
+            for i in range(0, len(pedidos_para_buscar), TAMANHO_LOTE):
+                lote = pedidos_para_buscar[i : i + TAMANHO_LOTE]
+                
+                # Faz as requisições deste lote
+                tarefas = [buscar_detalhe_v3(client, p["_auth"], p.get("id")) for p in lote]
+                detalhes = await asyncio.gather(*tarefas)
+                
+                # Processa os resultados do lote
+                for p, detalhe in zip(lote, detalhes):
+                    texto_completo = str(detalhe).upper()
+                    eh_bonificacao = any(termo in texto_completo for termo in TERMOS_BLOQUEADOS)
+                    
+                    cache_pedidos[str(p.get("id"))] = eh_bonificacao
+                    
+                    if not eh_bonificacao:
+                        candidatos.append(p)
+                
+                # Opcional: Pausa mínima entre lotes para garantir paz com a API
+                await asyncio.sleep(0.5) 
+                    
+        salvar_cache_pedidos()
+
+    # ==========================================================
+    # Daqui para baixo é exatamente a sua lógica original
+    # ==========================================================
 
     ranking: dict = defaultdict(lambda: {"total": 0.0, "qtd": 0})
     faturamento = 0.0
     fat_prohair = 0.0
     fat_progrowth = 0.0
 
-    for item in todos:
-        p = item.get("pedido", item)
+    for item in candidatos:
         empresa = item.get("_empresa", "")
-
-        if not isinstance(p, dict):
-            continue
-
-        # ← Bloqueia qualquer status fora da lista válida (em aberto, aguardando, etc.)
-        situacao = (p.get("situacao") or "").strip()
-        if situacao.lower() not in STATUS_VALIDOS:
-            continue
-
-        if not natureza_ok(p):
-            continue
-
-        nome = nome_vendedor(p)
+        nome = nome_vendedor(item)
         if not nome:
             continue
 
-        # Restrição por perfil: vendedora só vê seus próprios dados
         if vendedora and vendedora.lower() not in nome.lower():
             continue
 
-        valor = extrair_valor(p)
+        valor = extrair_valor(item)
         ranking[nome]["total"] += valor
         ranking[nome]["qtd"] += 1
         faturamento += valor
@@ -242,8 +421,22 @@ async def dashboard(
     lista = []
     meta_total = 0.0
 
+    try:
+        data_obj = datetime.strptime(data_ini, "%Y-%m-%d")
+        dias_no_mes = calendar.monthrange(data_obj.year, data_obj.month)[1]
+    except:
+        dias_no_mes = 30
+
     for nome, dados in ranking.items():
-        meta = METAS_DIARIAS.get(nome, METAS_DIARIAS["PADRAO"]) * dias
+        meta_mensal = METAS_MENSAIS.get(nome, METAS_MENSAIS["PADRAO"])
+        
+        # Se a busca for o mês inteiro, mostra a meta redonda. 
+        # Se for fração (ex: 1 dia), calcula o proporcional.
+        if periodo == "mes":
+            meta = meta_mensal
+        else:
+            meta = (meta_mensal / dias_no_mes) * dias
+
         percentual = (dados["total"] / meta * 100) if meta else 0
         lista.append({
             "nome": nome,
@@ -265,9 +458,13 @@ async def dashboard(
         "meta_empresa": round(meta_total, 2),
         "melhor_vendedora": lista[0]["nome"] if lista else "-",
         "ranking": lista,
-        "periodo": {"inicio": data_ini, "fim": data_fim_calc, "dias": dias},
+        "periodo": {
+            "inicio": data_para_exibicao(data_ini),
+            "fim": data_para_exibicao(data_fim_calc),
+            "dias": dias,
+        },
+        "ultima_atualizacao": datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     }
-
 
 @app.get("/api/pedidos")
 async def listar_pedidos(
@@ -278,47 +475,47 @@ async def listar_pedidos(
     empresa: Optional[str] = None,
 ):
     data_ini, data_fim_calc = calcular_datas(periodo, data_inicio, data_fim)
-    todos = await buscar_todos(data_ini, data_fim_calc)
+    todos = await buscar_todos_v3(data_ini, data_fim_calc)
+
+    # 1. Filtro Básico
+    pre_candidatos = [item for item in todos if item.get("situacao") in SITUACOES_VALIDAS]
+
+    # 2. Filtro Profundo (Remove Bonificações)
+    candidatos = []
+    async with httpx.AsyncClient() as client:
+        tarefas = [buscar_detalhe_v3(client, item["_auth"], item.get("id")) for item in pre_candidatos]
+        detalhes = await asyncio.gather(*tarefas)
+        
+        for item, detalhe in zip(pre_candidatos, detalhes):
+            texto_completo = str(detalhe).upper()
+            eh_bonificacao = any(termo in texto_completo for termo in TERMOS_BLOQUEADOS)
+            
+            if not eh_bonificacao:
+                candidatos.append(item)
 
     resultado = []
 
-    for item in todos:
-        p = item.get("pedido", item)
+    for item in candidatos:
         emp = item.get("_empresa", "")
-
-        if not isinstance(p, dict):
-            continue
-
-        situacao = (p.get("situacao") or "").strip()
-        if situacao.lower() not in STATUS_VALIDOS:
-            continue
-        if not natureza_ok(p):
-            continue
-
-        nome = nome_vendedor(p)
+        nome = nome_vendedor(item)
         if not nome:
             continue
 
-        # Filtros opcionais
         if vendedora and vendedora.lower() not in nome.lower():
             continue
         if empresa and empresa.lower() != emp.lower():
             continue
 
-        valor = extrair_valor(p)
+        valor = extrair_valor(item)
 
         resultado.append({
-            "numero": str(p.get("numero") or p.get("id") or ""),
-            "data": p.get("data_pedido") or p.get("data") or "",
+            "numero": str(item.get("numeroPedido") or item.get("id") or ""),
+            "data": data_para_exibicao(item.get("dataCriacao") or ""),
             "vendedora": nome,
             "empresa": emp,
             "valor": round(valor, 2),
-            "situacao": situacao,
-            "cliente": (
-                p.get("nome_contato")
-                or (p.get("cliente") or {}).get("nome", "")
-                or ""
-            ),
+            "situacao": SITUACOES_NOME.get(item.get("situacao"), "Desconhecida"),
+            "cliente": (item.get("cliente") or {}).get("nome", ""),
         })
 
     resultado.sort(key=lambda x: x["data"], reverse=True)
@@ -327,5 +524,8 @@ async def listar_pedidos(
         "pedidos": resultado,
         "total": len(resultado),
         "valor_total": round(sum(p["valor"] for p in resultado), 2),
-        "periodo": {"inicio": data_ini, "fim": data_fim_calc},
+        "periodo": {
+            "inicio": data_para_exibicao(data_ini),
+            "fim": data_para_exibicao(data_fim_calc),
+        },
     }
