@@ -27,14 +27,14 @@ class TinyAuth:
         self._carregar_cache()
 
     def _carregar_cache(self):
-        """Puxa o token mais recente que está salvo lá na planilha via Apps Script."""
+        """Puxa o token mais recente que está salvo lá na planilha via GET (À prova de redirecionamentos)."""
         if not self.script_url: return
         try:
-            print(f"DEBUG TinyAuth[{self.nome_empresa}] | Consultando Apps Script...")
-            with httpx.Client() as client:
-                r = client.post(
-                    self.script_url, 
-                    json={"action": "get", "empresa": self.nome_empresa},
+            print(f"DEBUG TinyAuth[{self.nome_empresa}] | Consultando Apps Script (Leitura)...")
+            with httpx.Client(follow_redirects=True) as client:
+                # Mudança crucial: Agora ele acessa a URL passando a empresa e usando GET
+                r = client.get(
+                    f"{self.script_url}?empresa={self.nome_empresa}",
                     timeout=15
                 )
                 dados = r.json()
@@ -45,7 +45,7 @@ class TinyAuth:
                     self.expira_em = float(dados.get("expira_em", 0))
                     print(f"DEBUG TinyAuth[{self.nome_empresa}] | Tokens resgatados da nuvem.")
                 else:
-                    print(f"DEBUG TinyAuth[{self.nome_empresa}] | Empresa ainda não existe na nuvem. Usará .env.")
+                    print(f"DEBUG TinyAuth[{self.nome_empresa}] | Empresa ainda não existe na nuvem ou erro: {dados}")
                     
         except Exception as e:
             print(f"DEBUG TinyAuth[{self.nome_empresa}] | Erro ao carregar do Apps Script: {e}")
