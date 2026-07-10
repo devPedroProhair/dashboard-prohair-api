@@ -584,7 +584,10 @@ async def auth_callback(code: str = None, state: str = None, error: str = None):
         access_token = json_resp.get("access_token")
         refresh_token = json_resp.get("refresh_token")
         
-        # 2. Envia os tokens direto para o seu Google Sheets via Apps Script (Sem você tocar em nada)
+        import time
+        tempo_expiracao = int(time.time()) + json_resp.get("expires_in", 14400) - 60
+        
+        # 2. Envia os tokens direto para o seu Google Sheets
         apps_script_url = os.getenv("APPS_SCRIPT_URL")
         if apps_script_url:
             payload = {
@@ -592,7 +595,7 @@ async def auth_callback(code: str = None, state: str = None, error: str = None):
                 "empresa": "ProHair" if empresa_nome == "prohair" else "ProGrowth",
                 "access_token": access_token,
                 "refresh_token": refresh_token,
-                "expira_em": 0
+                "expira_em": tempo_expiracao
             }
             try:
                 await client.post(apps_script_url, json=payload, follow_redirects=True, timeout=15)
