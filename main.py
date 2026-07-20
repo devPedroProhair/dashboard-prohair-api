@@ -201,6 +201,7 @@ METAS_MENSAIS = {
     "Stephany Carolliny Soares Cândido Moreira": 35000.00,
     "Jenifer Mikaele Santos de Oliveira": 60000.00,
     "Marina David de Souza": 35000.00,
+    "Joelma Santos da Silva": 100000.00,
 }
 TERMOS_BLOQUEADOS = {"BONIFICA", "BRINDE", "TROCA", "GARANTIA", "REMESSA"}
 VENDEDORES_BLOQUEADOS = {"ANAMELIA", "LUIZ", "ANA CLARA", "ANDREZA", "NÍVIA"}
